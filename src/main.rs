@@ -192,7 +192,7 @@ fn main() -> Result<()> {
     if config.check_version {
         let grace_days = 2;
         if let Err(e) = version::check_for_new_version(
-            "https://isambard-sc.github.io/clifton/releases".parse()?,
+            "https://github.com/isambard-sc/clifton/releases.atom".parse()?,
             grace_days,
         )
         .context("Failed to check for new version of Clifton.")

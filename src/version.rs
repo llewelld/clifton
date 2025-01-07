@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: © 2024 Matt Williams <matt.williams@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::{Context, Result};
-use serde::Deserialize;
+use std::io::BufReader;
 
-#[derive(Deserialize, Clone)]
+use anyhow::{Context, Result};
+
 struct Release {
     version: semver::Version,
     date: chrono::NaiveDate,
@@ -44,27 +44,35 @@ pub fn check_for_new_version(url: url::Url, grace_days: i64) -> Result<()> {
 }
 
 fn get_latest_release(url: url::Url) -> Result<Release> {
-    let releases: Vec<Release> = reqwest::blocking::Client::builder()
+    let releases = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .context("Could not build HTTP client.")?
         .get(url)
         .send()
-        .context("Could not get list of released versions.")?
-        .json()
-        .context("Could not parse JSON response.")?;
-    releases
+        .context("Could not get list of released versions.")?;
+    atom_syndication::Feed::read_from(BufReader::new(releases))?
+        .entries()
         .iter()
-        .max_by_key(|r| &r.version)
+        .filter_map(|e| {
+            if let Ok(version) = semver::Version::parse(&e.title.value) {
+                Some(Release {
+                    version,
+                    date: e.updated.date_naive(),
+                })
+            } else {
+                None
+            }
+        })
+        .max_by_key(|r| r.version.clone())
         .context("Could not get maximum version.")
-        .cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atom_syndication::{Entry, Feed, Text};
     use mockito::Server;
-    use serde_json::json;
 
     #[test]
     fn test_check_version() -> Result<()> {
@@ -74,16 +82,28 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "text/json")
             .with_body(
-                json!([
-                    {
-                        "version": "100.0.0",
-                        "date": chrono::Local::now().date_naive() - chrono::TimeDelta::days(5)
-                    },
-                    {
-                        "version": "0.1.0",
-                        "date": "1970-01-01"
-                    }
-                ])
+                Feed {
+                    entries: vec![
+                        Entry {
+                            title: Text {
+                                value: "100.0.0".to_string(),
+                                ..Default::default()
+                            },
+                            updated: chrono::Local::now().fixed_offset()
+                                - chrono::TimeDelta::days(5),
+                            ..Default::default()
+                        },
+                        Entry {
+                            title: Text {
+                                value: "0.1.0".to_string(),
+                                ..Default::default()
+                            },
+                            updated: "1970-01-01T12:00:00+00:00".parse()?,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }
                 .to_string(),
             )
             .expect_at_least(1)
