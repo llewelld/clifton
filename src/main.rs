@@ -136,6 +136,9 @@ enum Commands {
     /// Empty the cache
     #[command(hide = true)]
     ClearCache,
+    /// Manage the config
+    #[command(hide = true)]
+    Config,
 }
 
 #[derive(Subcommand)]
@@ -483,6 +486,9 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::ClearCache) => cache::delete_all()?,
+        Some(Commands::Config) => {
+            println!("{}", default_config_path().display());
+        }
         None => Args::command().print_help()?,
     }
 
