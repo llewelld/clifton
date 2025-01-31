@@ -103,7 +103,7 @@ struct CertificateConfigCache {
 }
 
 impl CertificateConfigCache {
-    fn from_reponse(r: CertificateSignResponse, identity: std::path::PathBuf) -> Self {
+    fn from_response(r: CertificateSignResponse, identity: std::path::PathBuf) -> Self {
         CertificateConfigCache {
             platforms: r.platforms,
             projects: r.projects,
@@ -368,7 +368,7 @@ fn main() -> Result<()> {
             let valid_for = valid_before - Tz::now();
             cache::write_file(
                 cert_details_file_name,
-                serde_json::to_string(&CertificateConfigCache::from_reponse(
+                serde_json::to_string(&CertificateConfigCache::from_response(
                     cert,
                     identity_file.to_path_buf(),
                 ))?,
