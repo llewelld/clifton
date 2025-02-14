@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Allow `--config-file` to be passed at any level of subcommands.
 
 ### Changed
-- Retrieve OIDC client ID from the CA rather than setting it in the config.
+- Retrieve OIDC client ID from the CA rather than setting it in the config. Requires version 0.3 of Conch.
 
 ## [0.2.0] - 2024-09-13
 ### Changed
