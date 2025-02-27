@@ -302,6 +302,7 @@ impl CertificateConfigCache {
             }
         };
         let config = jump_configs + &alias_configs.join("\n");
+        let config = "# CLIFTON MANAGED\n".to_string() + &config;
         Ok(config)
     }
 }
@@ -579,9 +580,18 @@ fn main() -> Result<()> {
                 valid_for.num_hours(),
                 valid_for.num_minutes() % 60,
             );
-            println!(
-                "You may now want to run `clifton ssh-config write` to configure your SSH config aliases."
-            );
+            let clifton_ssh_config_path = dirs::home_dir()
+                .context("")?
+                .join(".ssh")
+                .join("config_clifton");
+            if &cert_config_cache.ssh_config()?
+                != &std::fs::read_to_string(&clifton_ssh_config_path).unwrap_or_default()
+            {
+                let bold = anstyle::Style::new().bold();
+                println!(
+                    "\n{bold}Config appears to have changed.\nYou may now want to run `clifton ssh-config write` to configure your SSH config aliases.{bold:#}"
+                );
+            }
         }
         Some(Commands::SshConfig { command }) => {
             let f: CertificateConfigCache = serde_json::from_str(
@@ -612,11 +622,10 @@ fn main() -> Result<()> {
 
                     let current_clifton_config =
                         std::fs::read_to_string(&clifton_ssh_config_path).unwrap_or_default();
-                    let text_for_file = "# CLIFTON MANAGED\n".to_string() + config;
-                    if text_for_file == current_clifton_config {
+                    if config == &current_clifton_config {
                         println!("SSH config is already up to date.");
                     } else {
-                        std::fs::write(&clifton_ssh_config_path, &text_for_file)
+                        std::fs::write(&clifton_ssh_config_path, &config)
                             .context("Could not write clifon SSH config file.")?;
                         println!(
                             "Wrote SSH config to {}.",
