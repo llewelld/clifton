@@ -31,7 +31,7 @@ enum CertificateSignResponse {
 #[derive(Deserialize)]
 struct CertificateSignResponseV2 {
     certificate: ssh_key::Certificate,
-    platforms: Platforms,
+    platforms: Resources,
     projects: ProjectsV2,
     short_name: String,
     user: String,
@@ -41,9 +41,17 @@ struct CertificateSignResponseV2 {
 #[derive(Deserialize)]
 struct CertificateSignResponseV3 {
     certificate: ssh_key::Certificate,
-    platforms: Platforms,
-    projects: Projects,
+    resources: Resources,
+    associations: Associations,
     user: String,
+}
+
+// TODO better name
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Associations {
+    Projects(Projects),
+    Resources(HashMap<String, ResourceAssociation>),
 }
 
 // Waiting on https://github.com/serde-rs/serde/issues/745
@@ -105,23 +113,22 @@ impl CaOidcResponse {
 type ProjectsV2 = HashMap<String, Vec<String>>;
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Hash, Eq, Deserialize, Serialize)]
-struct Resource {
-    name: String,
+struct ResourceAssociation {
     username: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct Project {
     name: String,
-    resources: Vec<Resource>,
+    resources: HashMap<String, ResourceAssociation>,
 }
 
 type Projects = HashMap<String, Project>;
 
-type Platforms = HashMap<String, Platform>;
+type Resources = HashMap<String, Resource>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct Platform {
+struct Resource {
     alias: String,
     #[serde(with = "http_serde::authority")]
     hostname: http::uri::Authority,
@@ -131,8 +138,8 @@ struct Platform {
 
 #[derive(Deserialize, Serialize)]
 struct CertificateConfigCache {
-    platforms: Platforms,
-    projects: Projects,
+    resources: Resources,
+    associations: Associations,
     user: String,
     identity: std::path::PathBuf,
 }
@@ -147,35 +154,155 @@ impl CertificateConfigCache {
                 short_name,
                 user,
             }) => CertificateConfigCache {
-                platforms: platforms.clone(),
-                projects: projects
-                    .iter()
-                    .map(|(project_id, platform_ids)| {
-                        (
-                            project_id.to_string(),
-                            Project {
-                                name: "".to_string(),
-                                resources: platform_ids
-                                    .iter()
-                                    .map(|platform_id| Resource {
-                                        name: platform_id.to_string(),
-                                        username: format!("{}.{}", &short_name, project_id),
-                                    })
-                                    .collect(),
-                            },
-                        )
-                    })
-                    .collect(),
+                resources: platforms.clone(),
+                associations: Associations::Projects(
+                    projects
+                        .iter()
+                        .map(|(project_id, resource_ids)| {
+                            (
+                                project_id.to_string(),
+                                Project {
+                                    name: "".to_string(),
+                                    resources: resource_ids
+                                        .iter()
+                                        .map(|resource_id| {
+                                            (
+                                                resource_id.to_string(),
+                                                ResourceAssociation {
+                                                    username: format!(
+                                                        "{}.{}",
+                                                        &short_name, project_id
+                                                    ),
+                                                },
+                                            )
+                                        })
+                                        .collect(),
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
                 user: user.clone(),
                 identity,
             },
             CertificateSignResponse::V3(r) => CertificateConfigCache {
-                platforms: r.platforms.clone(),
-                projects: r.projects.clone(),
+                resources: r.resources.clone(),
+                associations: r.associations.clone(),
                 user: r.user.clone(),
                 identity,
             },
         }
+    }
+
+    /// Get a resource from a resource ID
+    fn resource(&self, resource_id: &String) -> Result<&Resource> {
+        self.resources.get(resource_id).context(format!(
+            "Could not find resource details for `{}`",
+            resource_id
+        ))
+    }
+
+    /// Create the SSH config `Host` line for a given resource association
+    fn user_host_spec(
+        &self,
+        prefix: Option<&String>,
+        resource_id: &String,
+        resource: &ResourceAssociation,
+    ) -> Result<String> {
+        let alias = &self.resource(resource_id)?.alias;
+        let alias = if let Some(prefix) = prefix {
+            format!("{}.{}", prefix, alias)
+        } else {
+            alias.to_string()
+        };
+        let project_config = format!(
+            "Host {alias}\n\
+                        \tUser {}\n",
+            &resource.username,
+        );
+        Ok(project_config)
+    }
+
+    /// Make a list of SSH config `Host` entries for a set of resource associations
+    /// The optional prefix will be plcd in fron of the Host alias name
+    fn user_host_specs_for_resource_associations(
+        &self,
+        prefix: Option<&String>,
+        resource_associations: &HashMap<String, ResourceAssociation>,
+    ) -> Result<Vec<String>> {
+        resource_associations
+            .iter()
+            .sorted()
+            .map(|(resource_id, resource)| self.user_host_spec(prefix, resource_id, resource))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    fn ssh_config(&self) -> Result<String> {
+        let jump_configs = self
+            .resources
+            .iter()
+            .sorted_by_key(|x| x.0)
+            .map(|(_, c)| {
+                if let Some(proxy_jump) = &c.proxy_jump {
+                    let jump_alias = format!("jump.{}", &c.alias);
+                    let jump_config = format!(
+                        "Host {jump_alias}\n\
+                                \tHostname {}\n\
+                                \tIdentityFile \"{1}\"\n\
+                                \tCertificateFile \"{1}-cert.pub\"\n\
+                            \n",
+                        proxy_jump,
+                        self.identity.display(),
+                    );
+                    let host_config = format!(
+                        "Host *.{0} {0} !{jump_alias}\n\
+                                \tHostname {1}\n\
+                                \tProxyJump %r@{jump_alias}\n\
+                                \tIdentityFile \"{2}\"\n\
+                                \tCertificateFile \"{2}-cert.pub\"\n\
+                                \tAddKeysToAgent yes\n\
+                            \n",
+                        &c.alias,
+                        &c.hostname,
+                        self.identity.display(),
+                    );
+                    format!("{}{}", jump_config, host_config)
+                } else {
+                    format!(
+                        "Host *.{0} {0}\n\
+                                \tHostname {1}\n\
+                                \tIdentityFile \"{2}\"\n\
+                                \tCertificateFile \"{2}-cert.pub\"\n\
+                                \tAddKeysToAgent yes\n\
+                            \n",
+                        &c.alias,
+                        &c.hostname,
+                        self.identity.display(),
+                    )
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("");
+
+        let alias_configs = match &self.associations {
+            Associations::Projects(projects) => projects
+                .iter()
+                .sorted_by_key(|x| x.0)
+                .map(|(project_id, project)| {
+                    Ok(self
+                        .user_host_specs_for_resource_associations(
+                            Some(project_id),
+                            &project.resources,
+                        )?
+                        .join("\n"))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            Associations::Resources(resource_associations) => {
+                self.user_host_specs_for_resource_associations(None, resource_associations)?
+            }
+        };
+        let config = jump_configs + &alias_configs.join("\n");
+        Ok(config)
     }
 }
 
@@ -222,8 +349,8 @@ enum Commands {
     SshCommand {
         /// The short name of the project to provide the command for
         project: String,
-        /// The platform to access the project on
-        platform: Option<String>,
+        /// The resource to access the project on
+        platform: Option<String>, // TODO rename (and document change)
     },
     /// Empty the cache
     #[command(hide = true)]
@@ -347,9 +474,9 @@ fn main() -> Result<()> {
 
             let oidc_details: CaOidcResponse =
                 reqwest::blocking::get(format!("{}oidc", &config.ca_url))
-                    .context("Could not parse CA OIDC details URL.")?
+                    .context("Could not get CA OIDC details.")?
                     .error_for_status()
-                    .context("Could not get CA OIDC details URL")?
+                    .context("Could not get CA OIDC details.")?
                     .json()
                     .context("Could not parse CA OIDC details as URL.")?;
 
@@ -416,22 +543,27 @@ fn main() -> Result<()> {
                 .bold();
             let cert_config_cache =
                 CertificateConfigCache::from_response(&cert, identity_file.to_path_buf());
-            match cert_config_cache.projects.len() {
-                0 => {
-                    anyhow::bail!("Did not authenticate with any projects.")
-                }
-                _ => {
-                    let projects = cert_config_cache
-                        .projects
-                        .keys()
-                        .map(|p| format!(" - {}", &p))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    println!(
-                        "{green}Successfully authenticated as {} and downloaded SSH certificate for projects{green:#}:\n{projects}\n",
-                        &cert_config_cache.user
-                    );
-                }
+            match &cert_config_cache.associations {
+                Associations::Projects(projects) => match projects.len() {
+                    0 => {
+                        anyhow::bail!("Did not authenticate with any projects.")
+                    }
+                    _ => {
+                        let projects = projects
+                            .iter()
+                            .map(|(p_id, p)| format!(" - {} ({})", &p_id, &p.name))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        println!(
+                                    "{green}Successfully authenticated as {} and downloaded SSH certificate for projects{green:#}:\n{projects}\n",
+                                    &cert_config_cache.user
+                                );
+                    }
+                },
+                Associations::Resources(_resources) => println!(
+                                    "{green}Successfully authenticated as {} and downloaded SSH certificate.{green:#}",
+                                    &cert_config_cache.user
+                                ),
             }
             type Tz = chrono::offset::Utc; // TODO This is UNIX time, not UTC
             let valid_before: chrono::DateTime<Tz> = certificate.valid_before_time().into();
@@ -458,7 +590,7 @@ fn main() -> Result<()> {
                 )?,
             )
             .context("Could not parse certificate details cache. Try rerunning `clifton auth`.")?;
-            let config = ssh_config(&f)?;
+            let config = &f.ssh_config()?;
             match command {
                 Some(SshConfigCommands::Write { ssh_config }) => {
                     let main_ssh_config_path = shellexpand::path::tilde(ssh_config);
@@ -480,7 +612,7 @@ fn main() -> Result<()> {
 
                     let current_clifton_config =
                         std::fs::read_to_string(&clifton_ssh_config_path).unwrap_or_default();
-                    let text_for_file = "# CLIFTON MANAGED\n".to_string() + &config;
+                    let text_for_file = "# CLIFTON MANAGED\n".to_string() + config;
                     if text_for_file == current_clifton_config {
                         println!("SSH config is already up to date.");
                     } else {
@@ -493,24 +625,42 @@ fn main() -> Result<()> {
                     }
                     println!(
                         "Available host aliases: \n - {}",
-                        &f.projects
-                            .iter()
-                            .flat_map(|(project_id, project)| {
-                                project.resources.iter().map(|platform| {
-                                    Ok(format!(
-                                        "{}.{}",
-                                        project_id.clone(),
-                                        &f.platforms
-                                            .get(&platform.name)
-                                            .context(
-                                                "Could not find platform {platform} in config."
-                                            )?
-                                            .alias
-                                    ))
+                        match &f.associations {
+                            Associations::Projects(projects) => projects
+                                .iter()
+                                .flat_map(|(project_id, project)| {
+                                    project.resources.keys().map(|resource_id| {
+                                        Ok(format!(
+                                            "{}.{}",
+                                            project_id.clone(),
+                                            &f.resources
+                                                .get(resource_id)
+                                                .context(
+                                                    format!("Could not find resource {resource_id} in config.")
+                                                )?
+                                                .alias
+                                        ))
+                                    })
                                 })
-                            })
-                            .collect::<Result<Vec<_>>>()?
-                            .join("\n - "),
+                                .collect::<Result<Vec<_>>>()?
+                                .join("\n - "),
+                            Associations::Resources(resources) => {
+                                resources
+                                    .keys()
+                                    .map(|resource_id| {
+                                        Ok(&f
+                                            .resources
+                                            .get(resource_id)
+                                            .context(
+                                                format!("Could not find resource {resource_id} in config."),
+                                            )?
+                                            .alias)
+                                    })
+                                    .collect::<Result<Vec<_>>>()?
+                                    .into_iter()
+                                    .join("\n - ")
+                            }
+                        }
                     );
                 }
                 None => {
@@ -528,39 +678,44 @@ fn main() -> Result<()> {
                 )?,
             )
             .context("Could not parse certificate details cache. Try rerunning `clifton auth`.")?;
-            if let Some((_, s)) = &f.projects.iter().find(|(p_name, _)| p_name == &project) {
-                let resource = match s.resources.as_slice() {
-                    [] => Err(anyhow::anyhow!("No platforms found for requested project.")),
-                    [r] => Ok(r),
-                    resources => {
-                        if let Some(platform) = platform {
-                            resources.iter().find(|r| &r.name == platform).context("No matching platform.")
+            if let Some(s) = match &f.associations {
+                Associations::Projects(projects) => projects
+                    .iter()
+                    .find(|(p_name, _)| p_name == &project)
+                    .map(|p| p.1.resources.clone()),
+                Associations::Resources(resources) => Some(resources).cloned(),
+            } {
+                let (resource_id, resource_association) = match s.len() {
+                    2.. => {
+                        if let Some(resource) = platform {
+                            s.iter().find(|(resource_id, _)| *resource_id == resource).context("No matching resource.")
                         } else {
                             Err(anyhow::anyhow!(
                                 "Ambiguous project. \
-                                It's available on platforms {resources:?}. \
-                                Try specifying the platform with `clifton ssh-command {project} <PLATFORM>`"
+                                It's available on resources {s:?}. \
+                                Try specifying the resource with `clifton ssh-command {project} <PLATFORM>`"
                             ))
                         }
                     }
+                    _ => s.iter().next().ok_or(anyhow::anyhow!("No resources found for requested project.")),
                 }
-                .context("Could not get platform.")?;
-                let platform = f
-                    .platforms
-                    .get(&resource.name)
-                    .context(format!("Could not find {} in platforms.", resource.name))?;
+                .context("Could not get resource.")?;
+                let resource = f
+                    .resources
+                    .get(resource_id)
+                    .context(format!("Could not find {} in platforms.", resource_id))?;
                 let line = format!(
                     "ssh {}-i '{}' -o 'CertificateFile \"{}-cert.pub\"' -o 'AddKeysToAgent yes' {}.{}@{}",
-                    if let Some(j) = &platform.proxy_jump {
+                    if let Some(j) = &resource.proxy_jump {
                         format!("-J '%r@{}' ", j)
                     } else {
                         " ".to_string()
                     },
                     f.identity.display(),
                     f.identity.display(),
-                    &resource.username,
+                    &resource_association.username,
                     &project,
-                    &platform.hostname,
+                    &resource.hostname,
                 );
                 if std::io::stdout().is_terminal() {
                     // OpenSSH does not seem to offer the certificate to the jump host
@@ -585,81 +740,6 @@ fn main() -> Result<()> {
     // TODO Write known_hosts line
 
     Ok(())
-}
-
-fn ssh_config(f: &CertificateConfigCache) -> Result<String, anyhow::Error> {
-    let jump_configs = f
-        .platforms
-        .iter()
-        .sorted_by_key(|x| x.0)
-        .map(|(_, c)| {
-            if let Some(proxy_jump) = &c.proxy_jump {
-                let jump_alias = format!("jump.{}", &c.alias);
-                let jump_config = format!(
-                    "Host {jump_alias}\n\
-                                \tHostname {}\n\
-                                \tIdentityFile \"{1}\"\n\
-                                \tCertificateFile \"{1}-cert.pub\"\n\
-                            \n",
-                    proxy_jump,
-                    f.identity.display(),
-                );
-                let host_config = format!(
-                    "Host *.{} !{jump_alias}\n\
-                                \tHostname {}\n\
-                                \tProxyJump %r@{}\n\
-                                \tIdentityFile \"{3}\"\n\
-                                \tCertificateFile \"{3}-cert.pub\"\n\
-                                \tAddKeysToAgent yes\n\
-                            \n",
-                    &c.alias,
-                    &c.hostname,
-                    &jump_alias,
-                    f.identity.display(),
-                );
-                format!("{}{}", jump_config, host_config)
-            } else {
-                format!(
-                    "Host *.{}\n\
-                                \tHostname {}\n\
-                                \tIdentityFile \"{2}\"\n\
-                                \tCertificateFile \"{2}-cert.pub\"\n\
-                                \tAddKeysToAgent yes\n\
-                            \n",
-                    &c.alias,
-                    &c.hostname,
-                    f.identity.display(),
-                )
-            }
-        })
-        .collect::<Vec<String>>()
-        .join("");
-    let alias_configs = f
-        .projects
-        .iter()
-        .sorted()
-        .map(|(project_id, project)| {
-            let project_configs = project.resources.iter().map(|resource| {
-                let project_alias = format!(
-                    "{}.{}",
-                    &project_id,
-                    &f.platforms
-                        .get(&resource.name)
-                        .context("Could not find platform {platform} in config.")?
-                        .alias
-                );
-                let project_config = format!(
-                    "Host {project_alias}\n\
-                            \tUser {}\n",
-                    &resource.username,
-                );
-                Ok(project_config)
-            });
-            Ok(project_configs.collect::<Result<Vec<String>>>()?.join("\n"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let config = jump_configs + &alias_configs.join("\n");
-    Ok(config)
 }
 
 /// Get a signed certificate from CA
@@ -738,9 +818,14 @@ mod tests {
                             "alias": "1.example",
                             "hostname": "1.example.com",
                             "proxy_jump": "jump.example.com"
-                        }
+                        },
+                        "plat2": {
+                            "alias": "2.example",
+                            "hostname": "2.example.com",
+                            "proxy_jump": "jump.example.com"
+                        },
                     },
-                    "short_name": "nobody",
+                    "short_name": "foo",
                     "certificate": certificate,
                     "projects": {
                         "proj1": [
@@ -758,8 +843,15 @@ mod tests {
             )
             .create();
 
-        get_cert(&private_key, &url, &"foo".to_string()).context("Cannot call get_cert.")?;
+        let cert =
+            get_cert(&private_key, &url, &"foo".to_string()).context("Cannot call get_cert.")?;
         mock.assert();
+        let cert = CertificateConfigCache::from_response(&cert, "/foo/bar".into());
+        let config = cert.ssh_config()?;
+        assert!(config.contains("Host proj1.1.example\n\tUser foo.proj1"));
+        assert!(config.contains("Host proj1.2.example\n\tUser foo.proj1"));
+        assert!(config.contains("Host proj2.1.example\n\tUser foo.proj2"));
+        assert!(!config.contains("proj2.2.example"));
 
         let mock = server
             .mock("GET", "/sign")
@@ -771,36 +863,40 @@ mod tests {
             .with_header("content-type", "text/json")
             .with_body(
                 json!({
-                    "platforms": {
+                    "resources": {
                         "plat1": {
                             "alias": "1.example",
                             "hostname": "1.example.com",
                             "proxy_jump": "jump.example.com"
-                        }
+                        },
+                        "plat2": {
+                            "alias": "2.example",
+                            "hostname": "2.example.com",
+                            "proxy_jump": "jump.example.com"
+                        },
                     },
                     "certificate": certificate,
-                    "projects": {
-                        "proj1": {
-                            "name" : "Foo project",
-                            "resources" : [
-                                {
-                                    "name": "plat1",
-                                    "username": "foo.1",
-                                },
-                                {
-                                    "name": "plat2",
-                                    "username": "foo.2",
-                                },
-                            ]
-                        },
-                        "proj2": {
-                            "name" : "Bar project",
-                            "resources" : [
-                                {
-                                    "name": "plat1",
-                                    "username": "foo.1",
-                                },
-                            ]
+                    "associations": {
+                        "projects": {
+                            "proj1": {
+                                "name" : "Foo project",
+                                "resources" : {
+                                    "plat1": {
+                                        "username": "foo.1",
+                                    },
+                                    "plat2": {
+                                        "username": "foo.2",
+                                    },
+                                }
+                            },
+                            "proj2": {
+                                "name" : "Bar project",
+                                "resources" : {
+                                    "plat1": {
+                                        "username": "foo.1",
+                                    },
+                                }
+                            },
                         },
                     },
                     "user": "nobody@example.com",
@@ -810,8 +906,64 @@ mod tests {
             )
             .create();
 
-        get_cert(&private_key, &url, &"foo".to_string()).context("Cannot call get_cert.")?;
+        let cert =
+            get_cert(&private_key, &url, &"foo".to_string()).context("Cannot call get_cert.")?;
         mock.assert();
+        let cert = CertificateConfigCache::from_response(&cert, "/foo/bar".into());
+        let config = cert.ssh_config()?;
+        assert!(config.contains("Host proj1.1.example\n\tUser foo.1"));
+        assert!(config.contains("Host proj1.2.example\n\tUser foo.2"));
+        assert!(config.contains("Host proj2.1.example\n\tUser foo.1"));
+        assert!(!config.contains("proj2.2.example"));
+
+        let mock = server
+            .mock("GET", "/sign")
+            .match_query(Matcher::UrlEncoded(
+                "public_key".into(),
+                private_key.public_key().to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "text/json")
+            .with_body(
+                json!({
+                    "resources": {
+                        "plat1": {
+                            "alias": "1.example",
+                            "hostname": "1.example.com",
+                            "proxy_jump": "jump.example.com"
+                        },
+                        "plat2": {
+                            "alias": "2.example",
+                            "hostname": "2.example.com",
+                            "proxy_jump": "jump.example.com"
+                        },
+                    },
+                    "certificate": certificate,
+                    "associations": {
+                        "resources": {
+                            "plat1": {
+                                "username": "foo.1",
+                            },
+                            "plat2": {
+                                "username": "foo.2",
+                            },
+                        },
+                    },
+                    "user": "nobody@example.com",
+                    "version": 3,
+                })
+                .to_string(),
+            )
+            .create();
+
+        let cert =
+            get_cert(&private_key, &url, &"foo".to_string()).context("Cannot call get_cert.")?;
+        mock.assert();
+        let cert = CertificateConfigCache::from_response(&cert, "/foo/bar".into());
+        let config = cert.ssh_config()?;
+        assert!(config.contains("Host 1.example\n\tUser foo.1"));
+        assert!(config.contains("Host 2.example\n\tUser foo.2"));
+
         Ok(())
     }
 }
