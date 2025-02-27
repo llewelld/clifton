@@ -490,34 +490,19 @@ fn main() -> Result<()> {
                 ]
                 .join(std::ffi::OsStr::new("")),
             );
-            let token_cache_path = "token";
-            // Try to load the accedd token from the cache
             println!(
                 "Retrieving certificate for identity `{}`.",
                 &identity_file.display()
             );
-            let cert = cache::read_file(token_cache_path)
-                .ok()
-                .and_then(|token| {
-                    // TODO Don't even try the token if it's expired
-                    // If it's there, try to use it
-                    get_cert(&identity, &config.ca_url, &token).ok()
-                })
-                .map_or_else(
-                    || {
-                        // If the certificate could not be fetched, renew the API token
-                        let token = get_access_token(
-                            &oidc_details.client_id,
-                            &oidc_details.issuer,
-                            open_browser,
-                            show_qr,
-                            token_cache_path,
-                        )?;
-                        get_cert(&identity, &config.ca_url, token.secret())
-                    },
-                    Ok,
-                )
-                .context("Could not get certificate.");
+            let cert = {
+                let token = get_access_token(
+                    &oidc_details.client_id,
+                    &oidc_details.issuer,
+                    open_browser,
+                    show_qr,
+                )?;
+                get_cert(&identity, &config.ca_url, token.secret())
+            };
             let cert = match cert {
                 Ok(cert) => cert,
                 Err(e) => {

@@ -10,15 +10,12 @@ use oauth2::{AccessToken, TokenResponse as _};
 use qrcode::{render::unicode, QrCode};
 use url::Url;
 
-use crate::cache;
-
 /// Given an OAuth `client_id` and URL, authenticate with the device code workflow
-pub fn get_access_token<P: AsRef<std::path::Path>>(
+pub fn get_access_token(
     client_id: &String,
     issuer_url: &Url,
     open_webpage: bool,
     show_qr: bool,
-    token_cache_path: P,
 ) -> Result<AccessToken> {
     // let http_client = reqwest::blocking::Client::new();
     let http_client = oauth2::reqwest::blocking::ClientBuilder::new()
@@ -76,6 +73,5 @@ pub fn get_access_token<P: AsRef<std::path::Path>>(
         .request(&http_client, std::thread::sleep, None)
         .context("Could not get token from identity provider.")?;
 
-    cache::write_file(token_cache_path, token.access_token().secret())?;
     Ok(token.access_token().clone())
 }
