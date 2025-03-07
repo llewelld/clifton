@@ -18,7 +18,10 @@ fn ensure_cache_dir() -> Result<std::path::PathBuf> {
     match cache_dir.try_exists() {
         Ok(true) => (),
         Ok(false) => {
-            std::fs::create_dir_all(&cache_dir).context("Could not create cache directory.")?;
+            std::fs::create_dir_all(&cache_dir).context(format!(
+                "Could not create cache directory `{}`.",
+                &cache_dir.display()
+            ))?;
         }
         Err(err) => return Err(err).context("Cound not check for existence of cache directory."),
     };
@@ -37,8 +40,8 @@ pub fn write_file<P: AsRef<std::path::Path>, C: AsRef<[u8]>>(file: P, contents: 
     f.write(true)
         .truncate(true)
         .create(true)
-        .open(path)
-        .context("Could not open cache file.")?
+        .open(&path)
+        .context(format!("Could not open cache file `{}`.", &path.display()))?
         .write_all(contents.as_ref())
         .context("Could not write to cache.")?;
     Ok(())
@@ -55,7 +58,10 @@ pub fn read_file<P: AsRef<std::path::Path>>(file: P) -> Result<String> {
 pub fn delete_file<P: AsRef<std::path::Path>>(file: P) -> Result<()> {
     let cache_dir = cache_dir()?;
     let path = cache_dir.join(file);
-    std::fs::remove_file(path).context("Could not delete cache file.")
+    std::fs::remove_file(&path).context(format!(
+        "Could not delete cache file `{}`.",
+        &path.display()
+    ))
 }
 
 /// Delete the entire cache directory
@@ -64,5 +70,8 @@ pub fn delete_all() -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         r => r,
     }
-    .context("Could not delete cache directory.")
+    .context(format!(
+        "Could not delete cache directory `{}`.",
+        cache_dir()?.display()
+    ))
 }
