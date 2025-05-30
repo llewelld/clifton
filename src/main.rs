@@ -162,8 +162,9 @@ fn main() -> Result<()> {
             .context("Could not form absolute path for the identity file.")?;
             if !identity_file.is_file() {
                 anyhow::bail!(format!(
-                    "Identity file {} not found.\nEither specify the identity file (see `clifton auth --help`) or create a new key.",
+                    "Identity file {} not found.\nEither specify the identity file (see `{} auth --help`) or create a new key.",
                     &identity_file.display(),
+                    std::env::args().nth(0).unwrap_or("clifton".to_string()),
                 ))
             }
             let identity = match ssh_key::PrivateKey::read_openssh_file(&identity_file) {
@@ -302,7 +303,8 @@ fn main() -> Result<()> {
             {
                 let bold = anstyle::Style::new().bold();
                 println!(
-                    "\n{bold}Config appears to have changed.\nYou may now want to run `clifton ssh-config write` to configure your SSH config aliases.{bold:#}"
+                    "\n{bold}Config appears to have changed.\nYou may now want to run `{} ssh-config write` to configure your SSH config aliases.{bold:#}",
+                    std::env::args().nth(0).unwrap_or("clifton".to_string()),
                 );
             }
         }
@@ -324,6 +326,7 @@ fn main() -> Result<()> {
                     let include_line =
                         format!("Include \"{}\"\n", clifton_ssh_config_path.display());
                     if !current_main_config.contains(&include_line) {
+                        // TODO remove old unquoted Include line if it is present
                         let new_config = include_line + &current_main_config;
                         std::fs::write(&main_ssh_config_path, new_config)
                             .context("Could not write Include line to main SSH config file.")?;
