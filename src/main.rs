@@ -326,7 +326,11 @@ fn main() -> Result<()> {
                     let include_line =
                         format!("Include \"{}\"\n", clifton_ssh_config_path.display());
                     if !current_main_config.contains(&include_line) {
-                        // TODO remove old unquoted Include line if it is present
+                        // Remove the old non-quoted format of the Include line
+                        // This should be kept for a few versions
+                        let current_main_config = current_main_config
+                            .split(&format!("Include {}\n", clifton_ssh_config_path.display()))
+                            .join("");
                         let new_config = include_line + &current_main_config;
                         std::fs::write(&main_ssh_config_path, new_config)
                             .context("Could not write Include line to main SSH config file.")?;
