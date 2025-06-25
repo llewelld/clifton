@@ -303,7 +303,7 @@ fn main() -> Result<()> {
             {
                 let bold = anstyle::Style::new().bold();
                 println!(
-                    "\n{bold}Config appears to have changed.\nYou may now want to run `{} ssh-config write` to configure your SSH config aliases.{bold:#}",
+                    "\n{bold}SSH config appears to have changed.\nYou may now want to run `{} ssh-config write` to configure your SSH config aliases.{bold:#}",
                     std::env::args().nth(0).unwrap_or("clifton".to_string()),
                 );
             }
