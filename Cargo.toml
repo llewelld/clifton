@@ -39,6 +39,7 @@ built = { version = "0.8", default-features = false, features = ["git2"] }
 [dev-dependencies]
 mockito = "1.5"
 ssh-key = { version = "0.6", default-features = false, features = ["ed25519", "rand_core"] }
+ssh2-config = { version = "0.6.0", default-features = false }
 
 [profile.release]
 strip = true

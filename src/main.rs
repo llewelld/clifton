@@ -521,6 +521,7 @@ mod tests {
     use super::*;
     use mockito::{Matcher, Server};
     use serde_json::json;
+    use ssh2_config::{ParseRule, SshConfig};
 
     #[test]
     fn test_get_cert() -> Result<()> {
@@ -591,10 +592,24 @@ mod tests {
         mock.assert();
         let cert = CertificateConfigCache::from_response(&cert, "/foo/bar".into());
         let config = cert.ssh_config()?;
-        assert!(config.contains("Host proj1.1.example\n\tUser foo.proj1"));
-        assert!(config.contains("Host proj1.2.example\n\tUser foo.proj1"));
-        assert!(config.contains("Host proj2.1.example\n\tUser foo.proj2"));
-        assert!(!config.contains("proj2.2.example"));
+        let mut reader = std::io::BufReader::new(config.as_bytes());
+        let config = SshConfig::default().parse(&mut reader, ParseRule::STRICT)?;
+        assert_eq!(
+            config.query("proj1.1.example").user,
+            Some("foo.proj1".to_string())
+        );
+        assert_eq!(
+            config.query("proj1.2.example").user,
+            Some("foo.proj1".to_string())
+        );
+        assert_eq!(
+            config.query("proj2.1.example").user,
+            Some("foo.proj2".to_string())
+        );
+        assert!(config
+            .get_hosts()
+            .iter()
+            .any(|h| h.intersects("proj2.2.example")));
 
         let mock = server
             .mock("GET", "/sign")
@@ -654,10 +669,24 @@ mod tests {
         mock.assert();
         let cert = CertificateConfigCache::from_response(&cert, "/foo/bar".into());
         let config = cert.ssh_config()?;
-        assert!(config.contains("Host proj1.1.example\n\tUser foo.1"));
-        assert!(config.contains("Host proj1.2.example\n\tUser foo.2"));
-        assert!(config.contains("Host proj2.1.example\n\tUser foo.1"));
-        assert!(!config.contains("proj2.2.example"));
+        let mut reader = std::io::BufReader::new(config.as_bytes());
+        let config = SshConfig::default().parse(&mut reader, ParseRule::STRICT)?;
+        assert_eq!(
+            config.query("proj1.1.example").user,
+            Some("foo.1".to_string())
+        );
+        assert_eq!(
+            config.query("proj1.2.example").user,
+            Some("foo.2".to_string())
+        );
+        assert_eq!(
+            config.query("proj2.1.example").user,
+            Some("foo.1".to_string())
+        );
+        assert!(config
+            .get_hosts()
+            .iter()
+            .any(|h| h.intersects("proj2.2.example")));
 
         let mock = server
             .mock("GET", "/sign")
@@ -704,8 +733,10 @@ mod tests {
         mock.assert();
         let cert = CertificateConfigCache::from_response(&cert, "/foo/bar".into());
         let config = cert.ssh_config()?;
-        assert!(config.contains("Host 1.example\n\tUser foo.1"));
-        assert!(config.contains("Host 2.example\n\tUser foo.2"));
+        let mut reader = std::io::BufReader::new(config.as_bytes());
+        let config = SshConfig::default().parse(&mut reader, ParseRule::STRICT)?;
+        assert_eq!(config.query("1.example").user, Some("foo.1".to_string()));
+        assert_eq!(config.query("2.example").user, Some("foo.2".to_string()));
 
         Ok(())
     }
