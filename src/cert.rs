@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context, Result};
-use itertools::Itertools;
+use itertools::Itertools as _;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, io::Write as _};
 
 pub enum CertificateSignResponse {
     V2(CertificateSignResponseV2),
@@ -24,7 +24,6 @@ pub struct CertificateSignResponseV2 {
 /// First used in Conch 0.4
 #[derive(Deserialize)]
 pub struct CertificateSignResponseV3 {
-    pub certificate: ssh_key::Certificate,
     resources: Resources,
     associations: Associations,
     user: String,
@@ -35,6 +34,32 @@ pub struct CertificateSignResponseV3 {
 pub enum Associations {
     Projects(Projects),
     Resources(HashMap<String, ResourceAssociation>),
+}
+
+#[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Eq, Deserialize, Serialize)]
+pub struct ResourceAssociation {
+    pub username: String,
+    pub certificate: ssh_key::Certificate,
+}
+
+type ProjectsV2 = HashMap<String, Vec<String>>;
+type Projects = HashMap<String, Project>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Project {
+    pub name: String,
+    pub resources: HashMap<String, ResourceAssociation>,
+}
+
+type Resources = HashMap<String, Resource>;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Resource {
+    pub alias: String,
+    #[serde(with = "http_serde::authority")]
+    pub hostname: http::uri::Authority,
+    #[serde(with = "http_serde::option::authority")]
+    pub proxy_jump: Option<http::uri::Authority>,
 }
 
 // Waiting on https://github.com/serde-rs/serde/issues/745
@@ -93,90 +118,206 @@ impl CaOidcResponse {
     }
 }
 
-type ProjectsV2 = HashMap<String, Vec<String>>;
-
-#[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Hash, Eq, Deserialize, Serialize)]
-pub struct ResourceAssociation {
-    pub username: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Project {
-    pub name: String,
-    pub resources: HashMap<String, ResourceAssociation>,
-}
-
-type Projects = HashMap<String, Project>;
-
-type Resources = HashMap<String, Resource>;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Resource {
-    pub alias: String,
-    #[serde(with = "http_serde::authority")]
-    pub hostname: http::uri::Authority,
-    #[serde(with = "http_serde::option::authority")]
-    pub proxy_jump: Option<http::uri::Authority>,
-}
-
 #[derive(Deserialize, Serialize)]
 pub struct CertificateConfigCache {
     resources: Resources,
-    pub associations: Associations,
+    pub associations: AssociationsCache,
     pub user: String,
     pub identity: std::path::PathBuf,
 }
 
-impl CertificateConfigCache {
-    pub fn from_response(r: &CertificateSignResponse, identity: std::path::PathBuf) -> Self {
-        match r {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum AssociationsCache {
+    Projects(ProjectsCache),
+    Resources(HashMap<String, ResourceAssociationCache>),
+}
+
+type ProjectsCache = HashMap<String, ProjectCache>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProjectCache {
+    pub name: String,
+    pub resources: HashMap<String, ResourceAssociationCache>,
+}
+
+#[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Eq, Deserialize, Serialize)]
+pub struct ResourceAssociationCache {
+    pub username: String,
+    pub certificate: std::path::PathBuf,
+}
+
+/// Write the certificate file to disk
+fn write_certificate(
+    certificate: &ssh_key::Certificate,
+    path: &std::path::PathBuf,
+    slug: &String,
+) -> Result<std::path::PathBuf> {
+    let cert_file_path =
+        path.join(std::ffi::OsString::from(format!("{}-cert.pub", &slug,)).as_os_str());
+    let mut f = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        f = f.mode(0o600).clone(); // u=rw,g=,o=
+    }
+    f.write(true)
+        .truncate(true)
+        .create(true)
+        .open(&cert_file_path)
+        .context(format!(
+            "Could not open certificate file `{}` for writing.",
+            &cert_file_path.display()
+        ))?
+        .write_all(
+            certificate
+                .to_openssh()
+                .context("Could not convert certificate to OpenSSH format.")?
+                .as_ref(),
+        )
+        .context("Could not write certificate file.")?;
+    Ok(cert_file_path)
+}
+
+impl CertificateSignResponse {
+    /// Convert the certificate signing response to a object, saving
+    /// the certificate contents to disk.
+    pub fn cache(
+        self,
+        identity: std::path::PathBuf,
+        certificate_dir: &std::path::PathBuf,
+    ) -> Result<CertificateConfigCache> {
+        std::fs::create_dir_all(&certificate_dir)?;
+        match &self {
             CertificateSignResponse::V2(CertificateSignResponseV2 {
-                certificate: _,
+                certificate,
                 platforms,
                 projects,
                 short_name,
                 user,
-            }) => CertificateConfigCache {
+            }) => Ok(CertificateConfigCache {
                 resources: platforms.clone(),
-                associations: Associations::Projects(
+                associations: AssociationsCache::Projects(
                     projects
                         .iter()
                         .map(|(project_id, resource_ids)| {
-                            (
+                            Ok((
                                 project_id.to_string(),
-                                Project {
+                                ProjectCache {
                                     name: "".to_string(),
                                     resources: resource_ids
                                         .iter()
                                         .map(|resource_id| {
-                                            (
+                                            Ok((
                                                 resource_id.to_string(),
-                                                ResourceAssociation {
+                                                ResourceAssociationCache {
                                                     username: format!(
                                                         "{}.{}",
                                                         &short_name, project_id
                                                     ),
+                                                    certificate: {
+                                                        let slug = format!(
+                                                            "{}.{}",
+                                                            &project_id,
+                                                            &platforms
+                                                                .get(resource_id)
+                                                                .context(format!(
+                                                                    "Could not find resource details for `{}`",
+                                                                    resource_id
+                                                                ))?
+                                                                .alias
+                                                        );
+                                                        write_certificate(
+                                                            &certificate,
+                                                            &certificate_dir,
+                                                            &slug,
+                                                        )?
+                                                    },
                                                 },
-                                            )
+                                            ))
                                         })
-                                        .collect(),
+                                        .collect::<Result<_>>()?,
                                 },
-                            )
+                            ))
                         })
-                        .collect(),
+                        .collect::<Result<_>>()?,
                 ),
                 user: user.clone(),
                 identity,
-            },
-            CertificateSignResponse::V3(r) => CertificateConfigCache {
+            }),
+            CertificateSignResponse::V3(r) => Ok(CertificateConfigCache {
                 resources: r.resources.clone(),
-                associations: r.associations.clone(),
+                associations: match &r.associations {
+                    Associations::Resources(rs) => AssociationsCache::Resources(
+                        rs.iter()
+                            .map(|(resource_id, ra)| {
+                                Ok((
+                                    resource_id.clone(),
+                                    ResourceAssociationCache {
+                                        username: ra.username.clone(),
+                                        certificate: write_certificate(
+                                            &ra.certificate,
+                                            &certificate_dir,
+                                            &r.resources.get(resource_id)
+                                                .context(format!(
+                                                    "Could not find resource details for `{}`",
+                                                    resource_id
+                                                ))?
+                                                .alias,
+                                        )?,
+                                    },
+                                ))
+                            })
+                            .collect::<Result<_>>()?,
+                    ),
+                    Associations::Projects(ps) => AssociationsCache::Projects(
+                        ps.iter()
+                            .map(|(project_id, p)| {
+                                Ok((
+                                    project_id.clone(),
+                                    ProjectCache {
+                                        name: p.name.clone(),
+                                        resources: p
+                                            .resources
+                                            .iter()
+                                            .map(|(resource_id, ra)| {
+                                                Ok((
+                                                    resource_id.clone(),
+                                                    ResourceAssociationCache {
+                                                        username: ra.username.clone(),
+                                                        certificate: write_certificate(
+                                                            &ra.certificate,
+                                                            &certificate_dir,
+                                                            &format!(
+                                                                "{}.{}",
+                                                                &project_id,
+                                                                &r.resources
+                                                                    .get(resource_id)
+                                                                    .context(format!(
+                                                                        "Could not find resource details for `{}`",
+                                                                        resource_id
+                                                                    ))?
+                                                                    .alias
+                                                            ),
+                                                        )?,
+                                                    },
+                                                ))
+                                            })
+                                            .collect::<Result<_>>()?,
+                                    },
+                                ))
+                            })
+                            .collect::<Result<_>>()?,
+                    ),
+                },
                 user: r.user.clone(),
                 identity,
-            },
+            }),
         }
     }
+}
 
+impl CertificateConfigCache {
     /// Get a resource from a resource ID
     pub fn resource(&self, resource_id: &String) -> Result<&Resource> {
         self.resources.get(resource_id).context(format!(
@@ -190,7 +331,7 @@ impl CertificateConfigCache {
         &self,
         prefix: Option<&String>,
         resource_id: &String,
-        resource: &ResourceAssociation,
+        resource: &ResourceAssociationCache,
     ) -> Result<String> {
         let alias = &self.resource(resource_id)?.alias;
         let alias = if let Some(prefix) = prefix {
@@ -198,20 +339,27 @@ impl CertificateConfigCache {
         } else {
             alias.to_string()
         };
+        let project_jump_config = format!(
+            "Host jump.{alias}\n\
+                        \tCertificateFile \"{}\"\n",
+            &resource.certificate.display(),
+        );
         let project_config = format!(
             "Host {alias}\n\
-                        \tUser {}\n",
+                        \tUser {}\n\
+                        \tCertificateFile \"{}\"\n",
             &resource.username,
+            &resource.certificate.display(),
         );
-        Ok(project_config)
+        Ok(format!("{}{}", project_jump_config, project_config))
     }
 
     /// Make a list of SSH config `Host` entries for a set of resource associations
-    /// The optional prefix will be plcd in fron of the Host alias name
+    /// The optional prefix will be placed in front of the Host alias name
     fn user_host_specs_for_resource_associations(
         &self,
         prefix: Option<&String>,
-        resource_associations: &HashMap<String, ResourceAssociation>,
+        resource_associations: &HashMap<String, ResourceAssociationCache>,
     ) -> Result<Vec<String>> {
         resource_associations
             .iter()
@@ -227,24 +375,20 @@ impl CertificateConfigCache {
             .sorted_by_key(|x| x.0)
             .map(|(_, c)| {
                 if let Some(proxy_jump) = &c.proxy_jump {
-                    let jump_alias = format!("jump.{}", &c.alias);
+                    let jump_alias = format!("jump.*.{}", &c.alias);
                     let jump_config = format!(
                         "Host {jump_alias}\n\
                                 \tHostname {}\n\
-                                \tIdentityFile \"{1}\"\n\
-                                \tCertificateFile \"{1}-cert.pub\"\n\
-                            \n",
+                                \tIdentityFile \"{1}\"\n",
                         proxy_jump,
                         self.identity.display(),
                     );
                     let host_config = format!(
-                        "Host *.{0} {0} !{jump_alias}\n\
+                        "Host *.{0} !{jump_alias}\n\
                                 \tHostname {1}\n\
-                                \tProxyJump %r@{jump_alias}\n\
+                                \tProxyJump %r@jump.%n\n\
                                 \tIdentityFile \"{2}\"\n\
-                                \tCertificateFile \"{2}-cert.pub\"\n\
-                                \tAddKeysToAgent yes\n\
-                            \n",
+                                \tAddKeysToAgent yes\n",
                         &c.alias,
                         &c.hostname,
                         self.identity.display(),
@@ -255,7 +399,6 @@ impl CertificateConfigCache {
                         "Host *.{0} {0}\n\
                                 \tHostname {1}\n\
                                 \tIdentityFile \"{2}\"\n\
-                                \tCertificateFile \"{2}-cert.pub\"\n\
                                 \tAddKeysToAgent yes\n\
                             \n",
                         &c.alias,
@@ -265,10 +408,10 @@ impl CertificateConfigCache {
                 }
             })
             .collect::<Vec<String>>()
-            .join("");
+            .join("\n");
 
         let alias_configs = match &self.associations {
-            Associations::Projects(projects) => projects
+            AssociationsCache::Projects(projects) => projects
                 .iter()
                 .sorted_by_key(|x| x.0)
                 .map(|(project_id, project)| {
@@ -280,11 +423,11 @@ impl CertificateConfigCache {
                         .join("\n"))
                 })
                 .collect::<Result<Vec<_>>>()?,
-            Associations::Resources(resource_associations) => {
+            AssociationsCache::Resources(resource_associations) => {
                 self.user_host_specs_for_resource_associations(None, resource_associations)?
             }
         };
-        let config = jump_configs + &alias_configs.join("\n");
+        let config = jump_configs + "\n" + &alias_configs.join("\n");
         let config = "# CLIFTON MANAGED\n".to_string() + &config;
         Ok(config)
     }

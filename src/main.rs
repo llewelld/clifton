@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context, Result};
-use cert::{Associations, CertificateConfigCache, CertificateSignResponse};
+use cert::{AssociationsCache, CertificateConfigCache, CertificateSignResponse};
 use clap::{CommandFactory as _, Parser, Subcommand};
 use itertools::Itertools;
 use std::io::{IsTerminal, Write as _};
@@ -141,7 +141,8 @@ fn main() -> Result<()> {
         }
     }
 
-    let cert_details_file_name = "cert.json";
+    let site_name = config.default_site;
+    let cert_details_file_name = format!("{}.json", &site_name);
 
     match &args.command {
         Some(Commands::Auth {
@@ -192,7 +193,6 @@ fn main() -> Result<()> {
                 );
             }
 
-            let site_name = config.default_site;
             let site = config
                 .sites
                 .get(&site_name)
@@ -205,15 +205,6 @@ fn main() -> Result<()> {
                     .json()
                     .context("Could not parse CA OIDC details as URL.")?;
 
-            let cert_file_path = identity_file.with_file_name(
-                [
-                    identity_file
-                        .file_name()
-                        .context("Could not understand identity file name.")?,
-                    std::ffi::OsStr::new("-cert.pub"),
-                ]
-                .join(std::ffi::OsStr::new("")),
-            );
             println!(
                 "Retrieving certificate for identity `{}`.",
                 &identity_file.display()
@@ -234,39 +225,13 @@ fn main() -> Result<()> {
                     anyhow::bail!(e)
                 }
             };
-            let certificate = match &cert {
-                CertificateSignResponse::V2(r) => &r.certificate,
-                CertificateSignResponse::V3(r) => &r.certificate,
-            };
-            let mut f = std::fs::OpenOptions::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-
-                f = f.mode(0o644).clone(); // u=rw,g=r,o=r
-            }
-            f.write(true)
-                .truncate(true)
-                .create(true)
-                .open(&cert_file_path)
-                .context(format!(
-                    "Could not open certificate file `{}` for writing.",
-                    &cert_file_path.display()
-                ))?
-                .write_all(
-                    certificate
-                        .to_openssh()
-                        .context("Could not convert certificate to OpenSSH format.")?
-                        .as_ref(),
-                )
-                .context("Could not write certificate file.")?;
             let green = anstyle::Style::new()
                 .fg_color(Some(anstyle::AnsiColor::Green.into()))
                 .bold();
-            let cert_config_cache =
-                CertificateConfigCache::from_response(&cert, identity_file.to_path_buf());
+            let certificate_dir = cache::cache_dir()?;
+            let cert_config_cache = cert.cache(identity_file.to_path_buf(), &certificate_dir)?;
             match &cert_config_cache.associations {
-                Associations::Projects(projects) => match projects.len() {
+                AssociationsCache::Projects(projects) => match projects.len() {
                     0 => {
                         anyhow::bail!("Did not authenticate with any projects.")
                     }
@@ -287,28 +252,19 @@ fn main() -> Result<()> {
                                 );
                     }
                 },
-                Associations::Resources(_resources) => println!(
+                AssociationsCache::Resources(_resources) => println!(
                                     "{green}Successfully authenticated as {} and downloaded SSH certificate.{green:#}",
                                     &cert_config_cache.user
                                 ),
             }
-            type Tz = chrono::offset::Utc; // TODO This is UNIX time, not UTC
-            let valid_before: chrono::DateTime<Tz> = certificate.valid_before_time().into();
-            let valid_for = valid_before - Tz::now();
             cache::write_file(
                 cert_details_file_name,
                 serde_json::to_string(&cert_config_cache)?,
             )
             .context("Could not write certificate details cache.")?;
-            println!("Certificate file written to {}", &cert_file_path.display());
-            println!(
-                "Certificate valid for {} hours and {} minutes.",
-                valid_for.num_hours(),
-                valid_for.num_minutes() % 60,
-            );
             let clifton_ssh_config_path = dirs::home_dir()
                 .context("")?
-                .join(".ssh")
+                // .join(".ssh")
                 .join("config_clifton");
             if cert_config_cache.ssh_config()?
                 != std::fs::read_to_string(&clifton_ssh_config_path).unwrap_or_default()
@@ -382,7 +338,7 @@ fn main() -> Result<()> {
                     println!(
                         "Available host aliases: \n - {}",
                         match &f.associations {
-                            Associations::Projects(projects) => projects
+                            AssociationsCache::Projects(projects) => projects
                                 .iter()
                                 .flat_map(|(project_id, project)| {
                                     project.resources.keys().map(|resource_id| {
@@ -395,7 +351,7 @@ fn main() -> Result<()> {
                                 })
                                 .collect::<Result<Vec<_>>>()?
                                 .join("\n - "),
-                            Associations::Resources(resources) => {
+                            AssociationsCache::Resources(resources) => {
                                 resources
                                     .keys()
                                     .map(|resource_id| Ok(&f.resource(resource_id)?.alias))
@@ -422,11 +378,11 @@ fn main() -> Result<()> {
             )
             .context("Could not parse certificate details cache. Try rerunning `clifton auth`.")?;
             if let Some(s) = match &f.associations {
-                Associations::Projects(projects) => projects
+                AssociationsCache::Projects(projects) => projects
                     .iter()
                     .find(|(p_name, _)| p_name == &project)
                     .map(|p| p.1.resources.clone()),
-                Associations::Resources(resources) => Some(resources).cloned(),
+                AssociationsCache::Resources(resources) => Some(resources).cloned(),
             } {
                 let (resource_id, resource_association) = match s.len() {
                     2.. => {
@@ -520,8 +476,18 @@ fn get_cert(
 mod tests {
     use super::*;
     use mockito::{Matcher, Server};
+    use rand::distr::{Alphanumeric, SampleString};
     use serde_json::json;
     use ssh2_config::{ParseRule, SshConfig};
+
+    #[rstest::fixture]
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(std::ffi::OsString::from(
+            Alphanumeric.sample_string(&mut rand::rng(), 16),
+        ));
+        std::fs::create_dir(&dir).expect("Could not create test temporary directory.");
+        dir
+    }
 
     #[test]
     fn test_get_cert() -> Result<()> {
@@ -590,10 +556,11 @@ mod tests {
         let cert =
             get_cert(&private_key, &url, &"foo".to_string()).context("Cannot call get_cert.")?;
         mock.assert();
-        let cert = CertificateConfigCache::from_response(&cert, "/foo/bar".into());
+        let cert = cert.cache("/foo/bar".into(), &temp_dir())?;
         let config = cert.ssh_config()?;
         let mut reader = std::io::BufReader::new(config.as_bytes());
         let config = SshConfig::default().parse(&mut reader, ParseRule::STRICT)?;
+        println!("{}", &config);
         assert_eq!(
             config.query("proj1.1.example").user,
             Some("foo.proj1".to_string())
@@ -633,7 +600,6 @@ mod tests {
                             "proxy_jump": "jump.example.com"
                         },
                     },
-                    "certificate": certificate,
                     "associations": {
                         "projects": {
                             "proj1": {
@@ -641,9 +607,11 @@ mod tests {
                                 "resources" : {
                                     "plat1": {
                                         "username": "foo.1",
+                                        "certificate": certificate,
                                     },
                                     "plat2": {
                                         "username": "foo.2",
+                                        "certificate": certificate,
                                     },
                                 }
                             },
@@ -652,6 +620,7 @@ mod tests {
                                 "resources" : {
                                     "plat1": {
                                         "username": "foo.1",
+                                        "certificate": certificate,
                                     },
                                 }
                             },
@@ -667,7 +636,7 @@ mod tests {
         let cert =
             get_cert(&private_key, &url, &"foo".to_string()).context("Cannot call get_cert.")?;
         mock.assert();
-        let cert = CertificateConfigCache::from_response(&cert, "/foo/bar".into());
+        let cert = cert.cache("/foo/bar".into(), &temp_dir())?;
         let config = cert.ssh_config()?;
         let mut reader = std::io::BufReader::new(config.as_bytes());
         let config = SshConfig::default().parse(&mut reader, ParseRule::STRICT)?;
@@ -710,14 +679,15 @@ mod tests {
                             "proxy_jump": "jump.example.com"
                         },
                     },
-                    "certificate": certificate,
                     "associations": {
                         "resources": {
                             "plat1": {
                                 "username": "foo.1",
+                                "certificate": certificate,
                             },
                             "plat2": {
                                 "username": "foo.2",
+                                "certificate": certificate,
                             },
                         },
                     },
@@ -731,7 +701,7 @@ mod tests {
         let cert =
             get_cert(&private_key, &url, &"foo".to_string()).context("Cannot call get_cert.")?;
         mock.assert();
-        let cert = CertificateConfigCache::from_response(&cert, "/foo/bar".into());
+        let cert = cert.cache("/foo/bar".into(), &temp_dir())?;
         let config = cert.ssh_config()?;
         let mut reader = std::io::BufReader::new(config.as_bytes());
         let config = SshConfig::default().parse(&mut reader, ParseRule::STRICT)?;

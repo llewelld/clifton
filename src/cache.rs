@@ -8,7 +8,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use anyhow::{Context, Result};
 
 /// The Clifton cache directory
-fn cache_dir() -> Result<std::path::PathBuf> {
+pub fn cache_dir() -> Result<std::path::PathBuf> {
     Ok(dirs::cache_dir().unwrap_or(".".parse()?).join("clifton"))
 }
 
