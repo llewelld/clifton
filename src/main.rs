@@ -55,6 +55,9 @@ enum Commands {
         /// Should the QR code be shown on the screen
         #[arg(long)]
         show_qr: Option<bool>,
+        /// Should the config be written out automatically
+        #[arg(long)]
+        write_config: Option<bool>,
     },
     /// Display the OpenSSH config
     SshConfig {
@@ -149,6 +152,7 @@ fn main() -> Result<()> {
             identity,
             open_browser,
             show_qr,
+            write_config,
         }) => {
             let open_browser = open_browser.unwrap_or(config.open_browser);
             let show_qr = show_qr.unwrap_or(config.show_qr);
@@ -264,16 +268,26 @@ fn main() -> Result<()> {
             .context("Could not write certificate details cache.")?;
             let clifton_ssh_config_path = dirs::home_dir()
                 .context("")?
-                // .join(".ssh")
+                .join(".ssh")
                 .join("config_clifton");
-            if cert_config_cache.ssh_config()?
-                != std::fs::read_to_string(&clifton_ssh_config_path).unwrap_or_default()
-            {
-                let bold = anstyle::Style::new().bold();
-                println!(
-                    "\n{bold}SSH config appears to have changed.\nYou may now want to run `{} ssh-config write` to configure your SSH config aliases.{bold:#}",
-                    std::env::args().nth(0).unwrap_or("clifton".to_string()),
-                );
+            let ssh_config = cert_config_cache.ssh_config()?;
+
+            if ssh_config != std::fs::read_to_string(&clifton_ssh_config_path).unwrap_or_default() {
+                if write_config.unwrap_or(config.write_config) {
+                    ssh_config_write(
+                        &clifton_ssh_config_path,
+                        &cert_config_cache.ssh_config()?,
+                        cert_config_cache,
+                    )?;
+                } else {
+                    let bold = anstyle::Style::new().bold();
+                    println!(
+                        "\n{bold}SSH config appears to have changed.\nYou may now want to run `{} ssh-config write` to configure your SSH config aliases.{bold:#}",
+                        std::env::args().nth(0).unwrap_or("clifton".to_string()),
+                    );
+                }
+            } else if write_config.unwrap_or(config.write_config) {
+                print_available_aliases(cert_config_cache)?;
             }
         }
         Some(Commands::SshConfig { command }) => {
@@ -286,81 +300,7 @@ fn main() -> Result<()> {
             let config = &f.ssh_config()?;
             match command {
                 Some(SshConfigCommands::Write { ssh_config }) => {
-                    let main_ssh_config_path = shellexpand::path::tilde(ssh_config);
-                    let current_main_config =
-                        std::fs::read_to_string(&main_ssh_config_path).unwrap_or_default();
-                    let clifton_ssh_config_path =
-                        main_ssh_config_path.with_file_name("config_clifton");
-                    let include_line =
-                        format!("Include \"{}\"\n", clifton_ssh_config_path.display());
-                    if !current_main_config.contains(&include_line) {
-                        // Remove the old non-quoted format of the Include line
-                        // This should be kept for a few versions
-                        let current_main_config = current_main_config
-                            .split(&format!("Include {}\n", clifton_ssh_config_path.display()))
-                            .join("");
-                        let new_config = include_line + &current_main_config;
-                        std::fs::write(&main_ssh_config_path, new_config)
-                            .context("Could not write Include line to main SSH config file.")?;
-                        println!(
-                            "Updated {} to contain Include line.",
-                            &main_ssh_config_path.display()
-                        );
-                    }
-
-                    let current_clifton_config =
-                        std::fs::read_to_string(&clifton_ssh_config_path).unwrap_or_default();
-                    if config == &current_clifton_config {
-                        println!("SSH config is already up to date.");
-                    } else {
-                        let mut f = std::fs::OpenOptions::new();
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::OpenOptionsExt as _;
-
-                            f = f.mode(0o644).clone(); // u=rw,g=r,o=r
-                        }
-                        f.write(true)
-                            .truncate(true)
-                            .create(true)
-                            .open(&clifton_ssh_config_path)
-                            .context(format!(
-                                "Could not open clifton SSH config file `{}`.",
-                                &clifton_ssh_config_path.display()
-                            ))?
-                            .write_all(config.as_ref())
-                            .context("Could not write clifton SSH config file.")?;
-                        println!(
-                            "Wrote SSH config to {}.",
-                            &clifton_ssh_config_path.display()
-                        );
-                    }
-                    println!(
-                        "Available host aliases: \n - {}",
-                        match &f.associations {
-                            AssociationsCache::Projects(projects) => projects
-                                .iter()
-                                .flat_map(|(project_id, project)| {
-                                    project.resources.keys().map(|resource_id| {
-                                        Ok(format!(
-                                            "{}.{}",
-                                            project_id.clone(),
-                                            &f.resource(resource_id)?.alias
-                                        ))
-                                    })
-                                })
-                                .collect::<Result<Vec<_>>>()?
-                                .join("\n - "),
-                            AssociationsCache::Resources(resources) => {
-                                resources
-                                    .keys()
-                                    .map(|resource_id| Ok(&f.resource(resource_id)?.alias))
-                                    .collect::<Result<Vec<_>>>()?
-                                    .into_iter()
-                                    .join("\n - ")
-                            }
-                        }
-                    );
+                    ssh_config_write(ssh_config, config, f)?;
                 }
                 None => {
                     eprintln!("Copy this configuration into your SSH config file");
@@ -470,6 +410,93 @@ fn get_cert(
     } else {
         anyhow::bail!(cert_r.text().context("Could not get error message.")?);
     }
+}
+
+fn ssh_config_write(
+    ssh_config: &std::path::PathBuf,
+    config: &String,
+    f: CertificateConfigCache,
+) -> Result<()> {
+    let main_ssh_config_path = shellexpand::path::tilde(ssh_config);
+    let current_main_config = std::fs::read_to_string(&main_ssh_config_path).unwrap_or_default();
+    let clifton_ssh_config_path = main_ssh_config_path.with_file_name("config_clifton");
+    let include_line = format!("Include \"{}\"\n", clifton_ssh_config_path.display());
+    if !current_main_config.contains(&include_line) {
+        // Remove the old non-quoted format of the Include line
+        // This should be kept for a few versions
+        let current_main_config = current_main_config
+            .split(&format!("Include {}\n", clifton_ssh_config_path.display()))
+            .join("");
+        let new_config = include_line + &current_main_config;
+        std::fs::write(&main_ssh_config_path, new_config)
+            .context("Could not write Include line to main SSH config file.")?;
+        println!(
+            "Updated {} to contain Include line.",
+            &main_ssh_config_path.display()
+        );
+    }
+
+    let current_clifton_config =
+        std::fs::read_to_string(&clifton_ssh_config_path).unwrap_or_default();
+    if config == &current_clifton_config {
+        println!("SSH config is already up to date.");
+    } else {
+        let mut f = std::fs::OpenOptions::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+
+            f = f.mode(0o644).clone(); // u=rw,g=r,o=r
+        }
+        f.write(true)
+            .truncate(true)
+            .create(true)
+            .open(&clifton_ssh_config_path)
+            .context(format!(
+                "Could not open clifton SSH config file `{}`.",
+                &clifton_ssh_config_path.display()
+            ))?
+            .write_all(config.as_ref())
+            .context("Could not write clifton SSH config file.")?;
+        println!(
+            "Wrote SSH config to {}.",
+            &clifton_ssh_config_path.display()
+        );
+    }
+    print_available_aliases(f)?;
+
+    Ok(())
+}
+
+fn print_available_aliases(f: CertificateConfigCache) -> Result<()> {
+    println!(
+        "Available host aliases: \n - {}",
+        match &f.associations {
+            AssociationsCache::Projects(projects) => projects
+                .iter()
+                .flat_map(|(project_id, project)| {
+                    project.resources.keys().map(|resource_id| {
+                        Ok(format!(
+                            "{}.{}",
+                            project_id.clone(),
+                            &f.resource(resource_id)?.alias
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join("\n - "),
+            AssociationsCache::Resources(resources) => {
+                resources
+                    .keys()
+                    .map(|resource_id| Ok(&f.resource(resource_id)?.alias))
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .join("\n - ")
+            }
+        }
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]

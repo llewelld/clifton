@@ -26,6 +26,9 @@ pub struct Config {
     /// Should Clifton check for version updates
     #[serde(default = "Config::default_check_version")]
     pub check_version: bool,
+    /// Should the config be written out after successful auth
+    #[serde(default = "Config::default_write_config")]
+    pub write_config: bool,
 }
 
 impl Config {
@@ -64,6 +67,9 @@ impl Config {
     }
     fn default_check_version() -> bool {
         true
+    }
+    fn default_write_config() -> bool {
+        false
     }
 }
 
