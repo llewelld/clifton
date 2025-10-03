@@ -251,15 +251,15 @@ fn main() -> Result<()> {
                             .collect::<Vec<_>>()
                             .join("\n");
                         println!(
-                                    "\n{green}Successfully authenticated as {} and downloaded SSH certificate for projects{green:#}:\n{projects}",
-                                    &cert_config_cache.user
-                                );
+                            "\n{green}Successfully authenticated as {} and downloaded SSH certificate for projects{green:#}:\n{project_name_list}",
+                            &cert_config_cache.user
+                        );
                     }
                 },
                 AssociationsCache::Resources(_resources) => println!(
-                                    "\n{green}Successfully authenticated as {} and downloaded SSH certificate.{green:#}",
-                                    &cert_config_cache.user
-                                ),
+                    "\n{green}Successfully authenticated as {} and downloaded SSH certificate.{green:#}",
+                    &cert_config_cache.user
+                ),
             }
             cache::write_file(
                 cert_details_file_name,
