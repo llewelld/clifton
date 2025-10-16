@@ -24,6 +24,13 @@ fn version() -> Result<semver::Version> {
 }
 
 pub fn check_for_new_version(url: url::Url, grace_days: i64) -> Result<()> {
+    if !version()?.pre.is_empty() {
+        eprintln!(
+            "Warning: You are running a pre-release version of Clifton: {}",
+            version()?
+        );
+        return Ok(());
+    }
     let release = get_latest_release(url).context("Could not get latest release.")?;
     if release.version > version()? && release.since().num_days() >= grace_days {
         eprintln!(
