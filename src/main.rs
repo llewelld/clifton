@@ -166,11 +166,15 @@ fn main() -> Result<()> {
                     .context("No identity file specified.")?,
             ))
             .context("Could not form absolute path for the identity file.")?;
+            let clifton_name = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_name().map(|f| f.display().to_string()))
+                .unwrap_or("clifton".to_string());
             if !identity_file.is_file() {
                 anyhow::bail!(format!(
                     "Identity file {} not found.\nEither specify the identity file (see `{} auth --help`) or create a new key.",
                     &identity_file.display(),
-                    std::env::args().nth(0).unwrap_or("clifton".to_string()),
+                    clifton_name,
                 ))
             }
             let identity = match ssh_key::PrivateKey::read_openssh_file(&identity_file) {
@@ -271,8 +275,8 @@ fn main() -> Result<()> {
             // We are, in prinicple, returned many certificates. Find the one with the soonest expiry time and print it.
             let first_expiry = match &cert_config_cache.associations {
                 AssociationsCache::Projects(projects) => projects
-                    .iter()
-                    .map(|(_, p)| {
+                    .values()
+                    .filter_map(|p| {
                         p.resources
                             .iter()
                             .filter_map(|(_, ra)| {
@@ -281,13 +285,10 @@ fn main() -> Result<()> {
                             .map(|cert| cert.valid_before_time())
                             .min()
                     })
-                    .flatten()
                     .min(),
                 AssociationsCache::Resources(resources) => resources
-                    .iter()
-                    .filter_map(|(_, ra)| {
-                        ssh_key::Certificate::read_file(ra.certificate.as_path()).ok()
-                    })
+                    .values()
+                    .filter_map(|ra| ssh_key::Certificate::read_file(ra.certificate.as_path()).ok())
                     .map(|cert| cert.valid_before_time())
                     .min(),
             };
@@ -318,7 +319,7 @@ fn main() -> Result<()> {
                     let bold = anstyle::Style::new().bold();
                     println!(
                         "\n{bold}SSH config appears to have changed.\nYou may now want to run `{} ssh-config write` to configure your SSH config aliases.{bold:#}",
-                        std::env::args().nth(0).unwrap_or("clifton".to_string()),
+                        std::env::args().next().unwrap_or("clifton".to_string()),
                     );
                 }
             } else if write_config.unwrap_or(config.write_config) {
@@ -518,17 +519,20 @@ fn print_available_aliases(f: CertificateConfigCache) -> Result<()> {
                     .keys()
                     .sorted()
                     .try_for_each(|resource_id| {
-                        Ok(println!(
+                        println!(
                             " - {}.{}",
                             project_id.clone(),
                             &f.resource(resource_id)?.alias
-                        ))
+                        );
+                        Ok(())
                     })
             }),
-        AssociationsCache::Resources(resources) => resources
-            .keys()
-            .sorted()
-            .try_for_each(|resource_id| Ok(println!(" - {}", &f.resource(resource_id)?.alias))),
+        AssociationsCache::Resources(resources) => {
+            resources.keys().sorted().try_for_each(|resource_id| {
+                println!(" - {}", &f.resource(resource_id)?.alias);
+                Ok(())
+            })
+        }
     }
 }
 

@@ -6,6 +6,7 @@ use itertools::Itertools as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::HashMap, io::Write as _};
 
+#[allow(clippy::large_enum_variant)]
 pub enum CertificateSignResponse {
     V2(CertificateSignResponseV2),
     V3(CertificateSignResponseV3),
@@ -149,7 +150,7 @@ pub struct ResourceAssociationCache {
 /// Write the certificate file to disk
 fn write_certificate(
     certificate: &ssh_key::Certificate,
-    path: &std::path::PathBuf,
+    path: &std::path::Path,
     slug: &String,
 ) -> Result<std::path::PathBuf> {
     let cert_file_path =
@@ -187,7 +188,7 @@ impl CertificateSignResponse {
         identity: std::path::PathBuf,
         certificate_dir: &std::path::PathBuf,
     ) -> Result<CertificateConfigCache> {
-        std::fs::create_dir_all(&certificate_dir)?;
+        std::fs::create_dir_all(certificate_dir)?;
         match &self {
             CertificateSignResponse::V2(CertificateSignResponseV2 {
                 certificate,
@@ -228,8 +229,8 @@ impl CertificateSignResponse {
                                                                 .alias
                                                         );
                                                         write_certificate(
-                                                            &certificate,
-                                                            &certificate_dir,
+                                                            certificate,
+                                                            certificate_dir,
                                                             &slug,
                                                         )?
                                                     },
@@ -257,7 +258,7 @@ impl CertificateSignResponse {
                                         username: ra.username.clone(),
                                         certificate: write_certificate(
                                             &ra.certificate,
-                                            &certificate_dir,
+                                            certificate_dir,
                                             &r.resources.get(resource_id)
                                                 .context(format!(
                                                     "Could not find resource details for `{}`",
@@ -287,7 +288,7 @@ impl CertificateSignResponse {
                                                         username: ra.username.clone(),
                                                         certificate: write_certificate(
                                                             &ra.certificate,
-                                                            &certificate_dir,
+                                                            certificate_dir,
                                                             &format!(
                                                                 "{}.{}",
                                                                 &project_id,
