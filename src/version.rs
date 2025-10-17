@@ -24,9 +24,10 @@ fn version() -> Result<semver::Version> {
 }
 
 pub fn check_for_new_version(url: url::Url, grace_days: i64) -> Result<()> {
+    let warning = anstyle::Style::new().bold();
     if !version()?.pre.is_empty() {
         eprintln!(
-            "Warning: You are running a pre-release version of Clifton: {}",
+            "{warning}Warning: You are running a pre-release version of Clifton: {}{warning:#}",
             version()?
         );
         return Ok(());
@@ -34,16 +35,16 @@ pub fn check_for_new_version(url: url::Url, grace_days: i64) -> Result<()> {
     let release = get_latest_release(url).context("Could not get latest release.")?;
     if release.version > version()? && release.since().num_days() >= grace_days {
         eprintln!(
-            "There is a new version of Clifton available. \
+            "{warning}There is a new version of Clifton available.{warning:#} \
             {} was released {} days ago. \
-            Visit https://github.com/isambard-sc/clifton/releases/tag/{0} to download it.",
+            Visit https://clifton.readthedocs.io/stable/install/ for installation instructions.",
             &release.version,
             &release.since().num_days()
         );
         if release.version.major > version()?.major {
             eprintln!(
-                "The new version is a major update. \
-                Your current version may stop working if you do not upgrade."
+                "{warning}The new version is a major update. \
+                Your current version may stop working if you do not upgrade.{warning:#}"
             );
         }
     }
