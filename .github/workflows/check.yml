@@ -13,6 +13,7 @@ on:
       ref:
         type: string
         default: ''
+  workflow_dispatch:
 
 permissions:
   contents: read
